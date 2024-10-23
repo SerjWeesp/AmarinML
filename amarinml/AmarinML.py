@@ -428,43 +428,73 @@ def Winsorization_Method(df_source, columns,  lower, upper):
     
     return ratio, df_win
 
-def analyze_columns(df, include_columns=None):
+def analyze_columns(data, include_columns=None, plot=True):
     """
-    Analyze specified columns of a DataFrame for skewness, kurtosis, and visual distribution.
+    Analyze specified columns of a DataFrame or Series for skewness, kurtosis, and visual distribution.
 
     Parameters:
-    - df: DataFrame to analyze.
-    - include_columns: List of column names to include in the analysis. Default is None (takes all columns)
+    - data: DataFrame or Series to analyze.
+    - include_columns: List of column names to include in the analysis. Default is None (takes all columns).
+    - plot: Boolean to determine whether to show visual plots (default is True).
 
-    This function will print the skewness and kurtosis for each specified column, and display
-    a distribution plot, a box plot, and a Q-Q plot for each.
+    Returns:
+    - A DataFrame with skewness and kurtosis values for the specified columns.
     """
+    # If input is a Series, convert it to a DataFrame
+    if isinstance(data, pd.Series):
+        data = data.to_frame()
+        # If Series has no name, set a default column name
+        if data.columns[0] == 0:
+            data.columns = ['Unnamed_Series']
+
+    # If input is a DataFrame, proceed normally
+    df = data
+
+    # Use all columns if no specific columns are provided
     if include_columns is None:
-        include_columns = df.columns  # Use all columns if none are specified
+        include_columns = df.columns
+
+    # Create an empty DataFrame to store the results
+    results = pd.DataFrame(columns=['Column', 'Skewness', 'Kurtosis'])
     
     for col in include_columns:
         if col in df.columns:
-            print(f"Skewness of {col}:", df[col].skew())
-            print(f"Kurtosis of {col}:", df[col].kurtosis())
+            skewness = df[col].skew()
+            kurtosis = df[col].kurtosis()
+            
+            # Append results to the DataFrame
+            new_row = pd.DataFrame({'Column': [col], 'Skewness': [skewness], 'Kurtosis': [kurtosis]})
+            results = pd.concat([results, new_row], ignore_index=True)
 
-            # Set up the matplotlib figure
-            plt.figure(figsize=(14, 4))
+            if plot:
+                # Set up the matplotlib figure
+                plt.figure(figsize=(14, 4))
 
-            # Distribution plot
-            plt.subplot(131)
-            sns.histplot(df[col], kde=True)
+                # Distribution plot
+                plt.subplot(131)
+                sns.histplot(df[col], kde=True)
+                plt.title(f'Distribution of {col}')
 
-            # Box plot
-            plt.subplot(132)
-            sns.boxplot(y=df[col])
+                # Box plot
+                plt.subplot(132)
+                sns.boxplot(y=df[col])
+                plt.title(f'Boxplot of {col}')
 
-            # Q-Q plot
-            plt.subplot(133)
-            probplot(df[col], plot=plt, rvalue=True, dist='norm')
-            plt.suptitle(col)
-            plt.show()
+                # Q-Q plot
+                plt.subplot(133)
+                probplot(df[col], plot=plt, rvalue=True, dist='norm')
+                plt.title(f'Q-Q plot of {col}')
+
+                plt.suptitle(f'Analysis of {col}')
+                plt.show()
+                
+                print(f"Skewness of {col}: {skewness}")
+                print(f"Kurtosis of {col}: {kurtosis}")
         else:
             print(f"Column '{col}' not found in DataFrame.")
+    
+    # Return the results DataFrame with skewness and kurtosis values
+    return results
 
 def normality_tests(data):
     """
