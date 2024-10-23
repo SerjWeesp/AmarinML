@@ -488,6 +488,7 @@ def analyze_columns(data, include_columns=None, plot=True):
                 plt.suptitle(f'Analysis of {col}')
                 plt.show()
                 
+                # Printing the results
                 print(f"Skewness of {col}: {skewness}")
                 print(f"Kurtosis of {col}: {kurtosis}")
         else:
