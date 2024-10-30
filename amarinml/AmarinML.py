@@ -859,11 +859,11 @@ def test_regression(model, X_train, X_test, y_train, y_test, cv):
     y_pred_train = model.predict(X_train)
     
     #Calculate scores
-    test_mse = -1*mean_squared_error(y_test, y_pred)
-    train_mae = -1*mean_absolute_error(y_train, y_pred_train)
-    test_mae = -1*mean_absolute_error(y_test, y_pred)
-    train_mape = -1*mean_absolute_percentage_error(y_train, y_pred_train)
-    test_mape = -1*mean_absolute_percentage_error(y_test, y_pred)
+    test_mse = mean_squared_error(y_test, y_pred)
+    train_mae = mean_absolute_error(y_train, y_pred_train)
+    test_mae = mean_absolute_error(y_test, y_pred)
+    train_mape = mean_absolute_percentage_error(y_train, y_pred_train)
+    test_mape = mean_absolute_percentage_error(y_test, y_pred)
     train_r2 = r2_score(y_train, y_pred_train)
     test_r2 = r2_score(y_test, y_pred)
     
