@@ -779,59 +779,6 @@ def compare_distributions(df_1, df_2, features=None, show_plot=False):
                 plt.show()
 
     return pd.DataFrame(results)
-  
-def linreg_p_values(model, X, y):
-    """
-    Calculate p-values for a linear regression model's coefficients.
-
-    This function fits a linear regression model using the provided data and
-    calculates the p-values for each predictor's coefficient. It assumes 
-    that the model passed as an argument is an instance of a linear regression
-    model from a library like sklearn, and that `X` and `y` are compatible
-    with this model.
-
-    Parameters:
-    model: A linear regression model instance from sklearn or similar library.
-           The model should not have been previously fitted.
-    X: DataFrame or 2D array-like
-       The input variables (predictors) for the regression model. If a DataFrame
-       is used, columns should have names for predictor identification in the output.
-    y: Array-like
-       The target variable (response) for the regression model.
-
-    Returns:
-    final_df: DataFrame
-              A pandas DataFrame containing the predictor names, estimated coefficients,
-              t-statistics, and p-values for each predictor in the model.
-    """
-    # Fit the model to the data
-    model.fit(X, y)
-    coefficients = model.coef_
-    predictions = model.predict(X)
-    residuals = y - predictions
-    
-    # Calculate degrees of freedom
-    n, k = X.shape
-    df = n - k - 1  # degrees of freedom for the residuals
-    
-    # Calculate Residual Sum of Squares (RSS)
-    rss = np.sum(residuals**2)
-    
-    # Calculate standard errors of the coefficients
-    X_with_intercept = np.hstack([np.ones((X.shape[0], 1)), X])  # Add intercept to X
-    inv_XTX = np.linalg.inv(X_with_intercept.T @ X_with_intercept)
-    stderr = np.sqrt(np.diag(inv_XTX) * rss / df)
-    
-    # Calculate t-statistics and p-values in a vectorized manner
-    t_stat = coefficients / stderr[1:]  # ignoring intercept term in stderr
-    p_values = 2 * (1 - stats.t.cdf(np.abs(t_stat), df))
-    
-    # Prepare final output
-    predictors = X.columns if isinstance(X, pd.DataFrame) else [f'X{i+1}' for i in range(k)]
-    data = {'Predictor': predictors, 'coef': coefficients, 't-stat': t_stat, 'p-values': p_values}
-    final_df = pd.DataFrame(data)
-    
-    return final_df
 
 def mean_absolute_percentage_error(y_true, y_pred):
     y_true = np.array(y_true).flatten()
@@ -911,7 +858,8 @@ def test_model_with_cv(model, X, y, cv, model_type):
             results_dict['ROC AUC CV Score'] = roc_auc
         except AttributeError as e:
             print("The classifier does not support predict_proba, and ROC AUC cannot be calculated.", e)
-
+    
+    model.fit(X, y)
     return model, results_dict
 
 def build_and_train_pipeline(X, y, problem_type, sort_by,
@@ -1131,3 +1079,56 @@ def calculate_skewness_kurtosis(df, nan_policy = 'omit'):
                 'Kurtosis': col_kurtosis
             }
     return pd.DataFrame(skew_kurtosis).T
+
+def linreg_p_values(model, X, y):
+    """
+    Calculate p-values for a linear regression model's coefficients.
+
+    This function fits a linear regression model using the provided data and
+    calculates the p-values for each predictor's coefficient. It assumes 
+    that the model passed as an argument is an instance of a linear regression
+    model from a library like sklearn, and that `X` and `y` are compatible
+    with this model.
+
+    Parameters:
+    model: A linear regression model instance from sklearn or similar library.
+           The model should not have been previously fitted.
+    X: DataFrame or 2D array-like
+       The input variables (predictors) for the regression model. If a DataFrame
+       is used, columns should have names for predictor identification in the output.
+    y: Array-like
+       The target variable (response) for the regression model.
+
+    Returns:
+    final_df: DataFrame
+              A pandas DataFrame containing the predictor names, estimated coefficients,
+              t-statistics, and p-values for each predictor in the model.
+    """
+    # Fit the model to the data
+    model.fit(X, y)
+    coefficients = model.coef_
+    predictions = model.predict(X)
+    residuals = y - predictions
+    
+    # Calculate degrees of freedom
+    n, k = X.shape
+    df = n - k - 1  # degrees of freedom for the residuals
+    
+    # Calculate Residual Sum of Squares (RSS)
+    rss = np.sum(residuals**2)
+    
+    # Calculate standard errors of the coefficients
+    X_with_intercept = np.hstack([np.ones((X.shape[0], 1)), X])  # Add intercept to X
+    inv_XTX = np.linalg.inv(X_with_intercept.T @ X_with_intercept)
+    stderr = np.sqrt(np.diag(inv_XTX) * rss / df)
+    
+    # Calculate t-statistics and p-values in a vectorized manner
+    t_stat = coefficients / stderr[1:]  # ignoring intercept term in stderr
+    p_values = 2 * (1 - stats.t.cdf(np.abs(t_stat), df))
+    
+    # Prepare final output
+    predictors = X.columns if isinstance(X, pd.DataFrame) else [f'X{i+1}' for i in range(k)]
+    data = {'Predictor': predictors, 'coef': coefficients, 't-stat': t_stat, 'p-values': p_values}
+    final_df = pd.DataFrame(data)
+    
+    return final_df
