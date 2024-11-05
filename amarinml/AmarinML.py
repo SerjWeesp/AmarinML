@@ -512,7 +512,6 @@ def normality_tests(data):
     Returns:
     - results (DataFrame): A DataFrame containing the results of the normality tests for each column.
     """
-    import scipy.stats as stats #solving scipy depreciation conflict 
     
     def run_tests(column_data):
         # Shapiro-Wilk Test
