@@ -32,13 +32,10 @@ import seaborn as sns
 import statsmodels.api as sm
 import warnings
 from tqdm import tqdm
-from feature_engine.encoding import RareLabelEncoder
-from feature_engine.outliers import OutlierTrimmer
-from feature_engine.selection import DropCorrelatedFeatures
+from zipfile import ZipFile
 from io import BytesIO
 from mlxtend.plotting import plot_decision_regions
 from scipy import stats
-from scipy.stats import kendalltau, pearsonr, probplot, randint, shapiro, spearmanr, stats, uniform, skew, kurtosis, mannwhitneyu
 from sklearn import feature_selection
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin, TransformerMixin
 from sklearn.calibration import calibration_curve
@@ -49,10 +46,10 @@ from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, Stratified
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, PolynomialFeatures, RobustScaler, StandardScaler
 from sklearn.ensemble import IsolationForest
-from zipfile import ZipFile
-from scipy.stats import boxcox
+from feature_engine.encoding import RareLabelEncoder
+from feature_engine.outliers import OutlierTrimmer
+from feature_engine.selection import DropCorrelatedFeatures
 
-#rewrite outlier trimmers to cut target variable too
 
 # Custom Transformer for Box-Cox Transformation
 class BoxCoxTransformer(BaseEstimator, TransformerMixin):
@@ -908,7 +905,7 @@ def test_model_with_cv(model, X, y, cv, model_type):
         train_score_key = 'train_' + score_name
         test_score_key = 'test_' + score_name
         results_dict[score_name + ' Train Score'] = np.mean(cv_results[train_score_key])
-        results_dict[score_name + ' CV Score'] = np.mean(cv_results[test_score_key])
+        results_dict[score_name + ' Test Score'] = np.mean(cv_results[test_score_key])
 
     # Handle ROC AUC for classification separately
     if model_type == 'classification':
@@ -919,7 +916,7 @@ def test_model_with_cv(model, X, y, cv, model_type):
         except AttributeError as e:
             print("The classifier does not support predict_proba, and ROC AUC cannot be calculated.", e)
 
-    return results_dict
+    return model, results_dict
 
 def build_and_train_pipeline(X, y, problem_type, sort_by,
                              model_steps,
