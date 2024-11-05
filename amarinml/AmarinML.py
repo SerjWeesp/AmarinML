@@ -812,26 +812,24 @@ def linreg_p_values(model, X, y):
     residuals = y - predictions
     
     # Calculate degrees of freedom
-    n = len(y)
-    k = X.shape[1]
-    df = n - k - 1 # degrees of freedom for the residuals
+    n, k = X.shape
+    df = n - k - 1  # degrees of freedom for the residuals
     
     # Calculate Residual Sum of Squares (RSS)
     rss = np.sum(residuals**2)
     
     # Calculate standard errors of the coefficients
-    X_with_intercept = np.column_stack([np.ones(X.shape[0]), X]) # Add intercept to X
-    inv_XTX = np.linalg.inv(np.dot(X_with_intercept.T, X_with_intercept))
-    stderr = np.sqrt(np.diagonal(inv_XTX) * rss / df)
+    X_with_intercept = np.hstack([np.ones((X.shape[0], 1)), X])  # Add intercept to X
+    inv_XTX = np.linalg.inv(X_with_intercept.T @ X_with_intercept)
+    stderr = np.sqrt(np.diag(inv_XTX) * rss / df)
     
-    # Calculate t-statistics
+    # Calculate t-statistics and p-values in a vectorized manner
     t_stat = coefficients / stderr[1:]  # ignoring intercept term in stderr
-    
-    # Calculate p-values
-    p_values = [2 * (1 - stats.t.cdf(np.abs(t), df)) for t in t_stat]
+    p_values = 2 * (1 - stats.t.cdf(np.abs(t_stat), df))
     
     # Prepare final output
-    data = {'Predictor': X.columns, 'coef': list(coefficients), 't-stat': list(t_stat), 'p-values': p_values}
+    predictors = X.columns if isinstance(X, pd.DataFrame) else [f'X{i+1}' for i in range(k)]
+    data = {'Predictor': predictors, 'coef': coefficients, 't-stat': t_stat, 'p-values': p_values}
     final_df = pd.DataFrame(data)
     
     return final_df
@@ -845,7 +843,6 @@ def mean_absolute_percentage_error(y_true, y_pred):
 
     # Calculate the MAPE
     return np.mean(np.abs((y_true[non_zero_mask] - y_pred[non_zero_mask]) / y_true[non_zero_mask])) * 100
-
 
 def test_regression(model, X_train, X_test, y_train, y_test, cv):    
     #initialize the model
