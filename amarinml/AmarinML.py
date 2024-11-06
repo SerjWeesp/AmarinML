@@ -479,7 +479,7 @@ def analyze_columns(data, include_columns=None, plot=True):
 
                 # Q-Q plot
                 plt.subplot(133)
-                probplot(df[col], plot=plt, rvalue=True, dist='norm')
+                stats.probplot(df[col], plot=plt, rvalue=True, dist='norm')
                 plt.title(f'Q-Q plot of {col}')
 
                 plt.suptitle(f'Analysis of {col}')
@@ -599,7 +599,7 @@ def heatmap_spearman_significance(df, annot=True):
     for col1 in df.columns:
         for col2 in df.columns:
             if col1 != col2:
-                corr, p_val = spearmanr(df[col1].dropna(), df[col2].dropna())
+                corr, p_val = stats.spearmanr(df[col1].dropna(), df[col2].dropna())
                 # Determine the significance level
                 if p_val < 0.01:
                     sig = '***'
@@ -744,7 +744,7 @@ def compare_distributions(df_1, df_2, features=None, show_plot=False):
     if isinstance(df_1, pd.Series) and isinstance(df_2, pd.Series):
         clean_df_1 = df_1.dropna()
         clean_df_2 = df_2.dropna()
-        u_statistic, p_value = mannwhitneyu(clean_df_1, clean_df_2)
+        u_statistic, p_value = stats.mannwhitneyu(clean_df_1, clean_df_2)
         if show_plot:
             plt.figure(figsize=(10, 6))
             sns.histplot(clean_df_1, color='blue', label='Dataset 1', kde=True, stat="density", linewidth=0, bins=30)
@@ -768,7 +768,7 @@ def compare_distributions(df_1, df_2, features=None, show_plot=False):
         clean_df_2 = clean_df_2[clean_df_2.apply(lambda x: np.isreal(x))]
         
         if len(clean_df_1) > 0 and len(clean_df_2) > 0:
-            u_statistic, p_value = mannwhitneyu(clean_df_1, clean_df_2)
+            u_statistic, p_value = stats.mannwhitneyu(clean_df_1, clean_df_2)
             results.append({'Feature': column, 'P-Value': p_value})
             if show_plot:
                 plt.figure(figsize=(10, 6))
