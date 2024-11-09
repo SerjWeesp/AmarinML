@@ -216,9 +216,9 @@ class RemoveHighCorr(BaseEstimator, TransformerMixin):
         # Compute correlations
         for i in range(len(cols)):
             for j in range(i):
-                corr, p_val = spearmanr(X.iloc[:, i], X.iloc[:, j]) if self.method == 'spearman' else \
-                              (pearsonr(X.iloc[:, i], X.iloc[:, j]) if self.method == 'pearson' else \
-                               kendalltau(X.iloc[:, i], X.iloc[:, j]))
+                corr, p_val = stats.spearmanr(X.iloc[:, i], X.iloc[:, j]) if self.method == 'spearman' else \
+                              (stats.pearsonr(X.iloc[:, i], X.iloc[:, j]) if self.method == 'pearson' else \
+                               stats.kendalltau(X.iloc[:, i], X.iloc[:, j]))
                 
                 if abs(corr) > self.thsld and p_val < self.p_val_tshld:
                     corr_counts[cols[i]] += 1
