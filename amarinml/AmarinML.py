@@ -1072,8 +1072,8 @@ def calculate_skewness_kurtosis(df, nan_policy = 'omit'):
     skew_kurtosis = {}
     for column in df.columns:
         if pd.api.types.is_numeric_dtype(df[column]):
-            col_skewness = skew(df[column], nan_policy = nan_policy)
-            col_kurtosis = kurtosis(df[column], nan_policy = nan_policy)
+            col_skewness = stats.skew(df[column], nan_policy = nan_policy)
+            col_kurtosis = stats.kurtosis(df[column], nan_policy = nan_policy)
             skew_kurtosis[column] = {
                 'Skewness': col_skewness,
                 'Kurtosis': col_kurtosis
