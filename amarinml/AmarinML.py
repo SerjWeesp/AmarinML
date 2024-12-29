@@ -42,10 +42,15 @@ from sklearn.calibration import calibration_curve
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import *
-from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, StratifiedKFold, train_test_split, cross_validate, cross_val_score
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, StratifiedKFold, train_test_split, cross_validate, cross_val_score, cross_val_predict
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, PolynomialFeatures, RobustScaler, StandardScaler
 from sklearn.ensemble import IsolationForest
+from sklearn.cluster import DBSCAN
+from sklearn.svm import OneClassSVM
+from sklearn.covariance import EllipticEnvelope
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LogisticRegression
 from feature_engine.encoding import RareLabelEncoder
 from feature_engine.outliers import OutlierTrimmer
 from feature_engine.selection import DropCorrelatedFeatures
@@ -64,87 +69,6 @@ class BoxCoxTransformer(BaseEstimator, TransformerMixin):
     def transform(self, X, y=None):
         # Apply Box-Cox transformation using fitted lambdas
         return np.array([boxcox(X[:, i] + 1e-6, lmbda=self.lambdas_[i]) for i in range(X.shape[1])]).T
-
-class IsolationForestOutlierTrimmer:
-    def __init__(self, contamination=0.01, random_state=42):
-        self.contamination = contamination
-        self.random_state = random_state
-        self.clf = IsolationForest(contamination=self.contamination, random_state=self.random_state)
-
-    def fit(self, X, y=None):
-        self.clf.fit(X)
-        return self
-
-    def transform(self, X, y=None):
-        y_pred = self.clf.predict(X)
-        mask = y_pred != -1
-        if y is not None:
-            return X[mask], y[mask]
-        return X[mask]
-
-    def fit_transform(self, X, y=None):
-        self.fit(X)
-        return self.transform(X, y)
-    
-class IQROutlierRemover(BaseEstimator, TransformerMixin):
-    def __init__(self, factor=1.5):
-        self.factor = factor
-        self.lower_bound_ = None
-        self.upper_bound_ = None
-        self.outlier_share_ = None  # Store the share of outliers removed
-
-    def fit(self, X, y=None):
-        X = pd.DataFrame(X)
-        
-        Q1 = X.quantile(0.25)
-        Q3 = X.quantile(0.75)
-        IQR = Q3 - Q1
-        
-        self.lower_bound_ = Q1 - self.factor * IQR
-        self.upper_bound_ = Q3 + self.factor * IQR
-        return self
-
-    def transform(self, X, y=None):
-        X = pd.DataFrame(X)
-        initial_row_count = len(X)
-        
-        is_within_bounds = (X >= self.lower_bound_) & (X <= self.upper_bound_)
-        X_filtered = X[is_within_bounds.all(axis=1)]
-        
-        final_row_count = len(X_filtered)
-        self.outlier_share_ = (initial_row_count - final_row_count) / initial_row_count
-        
-        if y is not None:
-            y = pd.Series(y) if isinstance(y, np.ndarray) else y
-            y_filtered = y.loc[X_filtered.index]
-            return X_filtered, y_filtered
-        
-        return X_filtered
-    
-    def fit_transform(self, X, y=None, **fit_params):
-        self.fit(X, y)
-        return self.transform(X, y)
-
-    def get_outlier_indices(self, X):
-        X = pd.DataFrame(X)
-        is_within_bounds = (X >= self.lower_bound_) & (X <= self.upper_bound_)
-        outliers_mask = ~is_within_bounds.all(axis=1)
-        return X[outliers_mask].index
-
-    def get_bounds(self):
-        bounds = pd.DataFrame({
-            'Feature': self.lower_bound_.index,
-            'Lower Bound': self.lower_bound_.values,
-            'Upper Bound': self.upper_bound_.values
-        })
-        bounds.set_index('Feature', inplace=True)
-        return bounds
-
-    def print_outlier_share(self):
-        if self.outlier_share_ is not None:
-            print(f"Total share of outliers removed: {self.outlier_share_ * 100:.2f}%")
-        else:
-            print("Outlier share not calculated. Ensure `transform` method has been called.")
 
 class StatmodelsWrapper(BaseEstimator):
     def __init__(self, model_type='ols', use_wls=False):
@@ -258,6 +182,469 @@ class SMOTETomekCustom(BaseEstimator, TransformerMixin):
         # Note: SMOTE is not applied here, it's only applied during fit
         return X
 
+class TqdmCallback:
+    def __init__(self, total):
+        self.pbar = tqdm(total=total)
+        self.update_interval = total // 20  # Update every 5%
+        self.last_update = 0
+
+    def __call__(self, res):
+        current_progress = len(res.x_iters)
+        if current_progress - self.last_update >= self.update_interval:
+            self.pbar.update(current_progress - self.last_update)
+            self.last_update = current_progress
+
+class OutlierHandler(BaseEstimator, TransformerMixin):
+    def __init__(self, method=None):
+        """
+        Initialize the FlexibleOutlierHandler with a custom method.
+        
+        Parameters:
+        -----------
+        method : object
+            An object with `fit` and `transform` methods for outlier handling.
+            This can be any user-defined or external outlier detection framework.
+        """
+        if method is None or not hasattr(method, 'fit') or not hasattr(method, 'transform'):
+            raise ValueError("The method must have both `fit` and `transform` methods.")
+        self.method = method
+        self.outlier_share_ = None  # Store the share of outliers removed
+
+    def fit(self, X, y=None):
+        self.method.fit(X, y)
+        return self
+
+    def transform(self, X, y=None):
+        initial_row_count = len(X)
+        X_transformed, y_transformed = self.method.transform(X, y) if y is not None else (self.method.transform(X), None)
+        final_row_count = len(X_transformed)
+        self.outlier_share_ = (initial_row_count - final_row_count) / initial_row_count
+        return (X_transformed, y_transformed) if y is not None else X_transformed
+
+    def fit_transform(self, X, y=None, **fit_params):
+        self.fit(X, y)
+        return self.transform(X, y)
+
+    def get_outlier_indices(self, X):
+        """
+        Get the indices of outliers based on the method used.
+        The method should implement a `get_outlier_indices` function.
+        """
+        if hasattr(self.method, "get_outlier_indices"):
+            return self.method.get_outlier_indices(X)
+        raise NotImplementedError("The selected method does not support `get_outlier_indices`.")
+
+    def get_bounds(self):
+        """
+        Get the bounds for outlier detection (if supported by the method).
+        The method should implement a `get_bounds` function.
+        """
+        if hasattr(self.method, "get_bounds"):
+            return self.method.get_bounds()
+        raise NotImplementedError("The selected method does not support `get_bounds`.")
+
+    def print_outlier_share(self):
+        if self.outlier_share_ is not None:
+            print(f"Total share of outliers removed: {self.outlier_share_ * 100:.2f}%")
+        else:
+            print("Outlier share not calculated. Ensure `transform` method has been called.")
+
+class IQRHandler:
+    def __init__(self, factor=1.5):
+        self.factor = factor
+        self.lower_bound_ = None
+        self.upper_bound_ = None
+
+    def fit(self, X, y=None):
+        X = pd.DataFrame(X)
+        Q1 = X.quantile(0.25)
+        Q3 = X.quantile(0.75)
+        IQR = Q3 - Q1
+        self.lower_bound_ = Q1 - self.factor * IQR
+        self.upper_bound_ = Q3 + self.factor * IQR
+        return self
+
+    def transform(self, X, y=None):
+        X = pd.DataFrame(X)
+        is_within_bounds = (X >= self.lower_bound_) & (X <= self.upper_bound_)
+        X_filtered = X[is_within_bounds.all(axis=1)]
+        if y is not None:
+            y = pd.Series(y) if isinstance(y, np.ndarray) else y
+            y_filtered = y.loc[X_filtered.index]
+            return X_filtered, y_filtered
+        return X_filtered
+
+    def get_outlier_indices(self, X):
+        X = pd.DataFrame(X)
+        is_within_bounds = (X >= self.lower_bound_) & (X <= self.upper_bound_)
+        return X[~is_within_bounds.all(axis=1)].index
+
+    def get_bounds(self):
+        """
+        Return a DataFrame containing the bounds for each feature.
+        """
+        bounds = pd.DataFrame({
+            'Feature': self.lower_bound_.index,
+            'Lower Bound': self.lower_bound_.values,
+            'Upper Bound': self.upper_bound_.values
+        })
+        bounds.set_index('Feature', inplace=True)
+        return bounds
+
+class IsolationForestHandler:
+    def __init__(self, contamination=0.01, random_state=23):
+        self.contamination = contamination
+        self.random_state = random_state
+        self.clf = IsolationForest(contamination=self.contamination, random_state=self.random_state)
+
+    def fit(self, X, y=None):
+        self.clf.fit(X)
+        return self
+
+    def transform(self, X, y=None):
+        y_pred = self.clf.predict(X)
+        mask = y_pred != -1
+        if y is not None:
+            return X[mask], y[mask]
+        return X[mask]
+
+    def get_outlier_indices(self, X):
+        y_pred = self.clf.predict(X)
+        return X.index[y_pred == -1]
+
+    def get_bounds(self):
+        """
+        IsolationForest does not compute explicit bounds.
+        """
+        raise NotImplementedError("IsolationForest does not define specific bounds for features.")
+
+class StdDevHandler:
+    def __init__(self, num_std=3):
+        self.num_std = num_std
+        self.lower_bound_ = None
+        self.upper_bound_ = None
+
+    def fit(self, X, y=None):
+        X = pd.DataFrame(X)
+        means = X.mean()
+        stds = X.std()
+        self.lower_bound_ = means - self.num_std * stds
+        self.upper_bound_ = means + self.num_std * stds
+        return self
+
+    def transform(self, X, y=None):
+        X = pd.DataFrame(X)
+        outliers = []
+        for col in X.columns:
+            mean = X[col].mean()
+            std = X[col].std()
+            tol = self.num_std * std
+            upper = mean + tol
+            lower = mean - tol
+            outliers.extend(X.index[(X[col] > upper) | (X[col] < lower)].tolist())
+        outliers = list(set(outliers))
+        X_filtered = X.drop(index=outliers)
+        if y is not None:
+            y = pd.Series(y) if isinstance(y, np.ndarray) else y
+            y_filtered = y.loc[X_filtered.index]
+            return X_filtered, y_filtered
+        return X_filtered
+
+    def get_outlier_indices(self, X):
+        X = pd.DataFrame(X)
+        outliers = []
+        for col in X.columns:
+            mean = X[col].mean()
+            std = X[col].std()
+            tol = self.num_std * std
+            upper = mean + tol
+            lower = mean - tol
+            outliers.extend(X.index[(X[col] > upper) | (X[col] < lower)].tolist())
+        return list(set(outliers))
+
+    def get_bounds(self):
+        """
+        Return a DataFrame containing the bounds for each feature.
+        """
+        bounds = pd.DataFrame({
+            'Feature': self.lower_bound_.index,
+            'Lower Bound': self.lower_bound_.values,
+            'Upper Bound': self.upper_bound_.values
+        })
+        bounds.set_index('Feature', inplace=True)
+        return bounds
+
+class DBSCANHandler:
+    def __init__(self, eps=0.5, min_samples=5):
+        self.eps = eps
+        self.min_samples = min_samples
+        self.clf = DBSCAN(eps=self.eps, min_samples=self.min_samples)
+
+    def fit(self, X, y=None):
+        self.clf.fit(X)
+        return self
+
+    def transform(self, X, y=None):
+        labels = self.clf.labels_
+        mask = labels != -1  # Points labeled -1 are considered noise (outliers)
+        if y is not None:
+            return X[mask], y[mask]
+        return X[mask]
+
+    def get_outlier_indices(self, X):
+        labels = self.clf.labels_
+        return X.index[labels == -1]
+
+    def get_bounds(self):
+        """
+        DBSCAN does not compute explicit bounds for features.
+        """
+        raise NotImplementedError("DBSCAN does not define specific bounds for features.")
+
+class OneClassSVMHandler:
+    def __init__(self, kernel="rbf", gamma="scale", nu=0.05):
+        self.kernel = kernel
+        self.gamma = gamma
+        self.nu = nu
+        self.clf = OneClassSVM(kernel=self.kernel, gamma=self.gamma, nu=self.nu)
+
+    def fit(self, X, y=None):
+        self.clf.fit(X)
+        return self
+
+    def transform(self, X, y=None):
+        y_pred = self.clf.predict(X)
+        mask = y_pred == 1
+        if y is not None:
+            return X[mask], y[mask]
+        return X[mask]
+
+    def get_outlier_indices(self, X):
+        y_pred = self.clf.predict(X)
+        return X.index[y_pred == -1]
+
+    def get_bounds(self):
+        """
+        One-Class SVM does not provide explicit feature-wise bounds.
+        """
+        raise NotImplementedError("One-Class SVM does not define specific bounds for features.")
+
+class EllipticEnvelopeHandler:
+    def __init__(self, contamination=0.01):
+        self.contamination = contamination
+        self.clf = EllipticEnvelope(contamination=self.contamination)
+
+    def fit(self, X, y=None):
+        self.clf.fit(X)
+        return self
+
+    def transform(self, X, y=None):
+        y_pred = self.clf.predict(X)
+        mask = y_pred != -1
+        if y is not None:
+            return X[mask], y[mask]
+        return X[mask]
+
+    def get_outlier_indices(self, X):
+        y_pred = self.clf.predict(X)
+        return X.index[y_pred == -1]
+
+    def get_bounds(self):
+        """
+        Elliptic Envelope does not provide explicit feature-wise bounds.
+        """
+        raise NotImplementedError("EllipticEnvelope does not define specific bounds for features.")
+
+class PCAOutlierHandler:
+    def __init__(self, n_components=None, contamination=0.05, threshold_method='reconstruction_error', dynamic_threshold=False):
+        """
+        Parameters:
+        -----------
+        dynamic_threshold : bool, optional
+            If True, contamination is ignored, and outliers are flagged using a fixed reconstruction error or Mahalanobis threshold.
+        """
+        self.n_components = n_components
+        self.contamination = contamination
+        self.threshold_method = threshold_method
+        self.dynamic_threshold = dynamic_threshold
+        self.pca = PCA(n_components=n_components)
+        self.threshold_ = None
+        self.errors_ = None
+
+    def fit(self, X, y=None):
+        self.pca.fit(X)
+        return self
+
+    def transform(self, X, y=None):
+        X = pd.DataFrame(X)
+        X_pca = self.pca.transform(X)
+        X_reconstructed = self.pca.inverse_transform(X_pca)
+        reconstruction_error = np.mean((X - X_reconstructed) ** 2, axis=1)
+        self.errors_ = reconstruction_error
+
+        if self.threshold_method == 'reconstruction_error':
+            if self.dynamic_threshold:
+                # Fixed threshold example (adjust as needed)
+                self.threshold_ = 0.01 * np.var(X.values)
+            else:
+                # Contamination-based threshold
+                self.threshold_ = np.percentile(reconstruction_error, (1 - self.contamination) * 100)
+            mask = reconstruction_error <= self.threshold_
+        elif self.threshold_method == 'mahalanobis':
+            cov = np.cov(X_pca.T)
+            inv_cov = np.linalg.inv(cov)
+            mean = np.mean(X_pca, axis=0)
+            mahalanobis_distance = np.array([np.dot(np.dot((x - mean), inv_cov), (x - mean).T) for x in X_pca])
+            self.errors_ = mahalanobis_distance
+            if self.dynamic_threshold:
+                # Fixed Mahalanobis distance threshold example
+                self.threshold_ = 3  # Arbitrary cutoff, tune as needed
+            else:
+                # Contamination-based threshold
+                self.threshold_ = chi2.ppf(1 - self.contamination, df=self.n_components or X.shape[1])
+            mask = mahalanobis_distance <= self.threshold_
+        else:
+            raise ValueError("Unsupported threshold method. Use 'reconstruction_error' or 'mahalanobis'.")
+
+        if y is not None:
+            return X[mask], y[mask]
+        return X[mask]
+
+    def get_outlier_indices(self, X):
+        """
+        Get the indices of outliers.
+        """
+        if self.errors_ is None:
+            raise ValueError("Model has not been fitted or transformed. Call `fit` or `transform` first.")
+        return np.where(self.errors_ > self.threshold_)[0]
+
+    def get_bounds(self):
+        """
+        PCA does not define explicit feature-wise bounds, but we can provide the threshold.
+        """
+        return pd.DataFrame({
+            'Threshold Method': [self.threshold_method],
+            'Threshold Value': [self.threshold_]
+        })
+
+    def get_reconstruction_errors(self):
+        """
+        Return the reconstruction errors for all data points.
+        """
+        if self.errors_ is None:
+            raise ValueError("Model has not been fitted or transformed. Call `fit` or `transform` first.")
+        return self.errors_
+
+class WinsorizerHandler:
+    def __init__(self, lower_quantile=0.01, upper_quantile=0.99):
+        """
+        Initialize the WinsorizerHandler.
+
+        Parameters:
+        -----------
+        lower_quantile : float, optional
+            The lower quantile threshold for Winsorization. Default is 0.01 (1st percentile).
+        upper_quantile : float, optional
+            The upper quantile threshold for Winsorization. Default is 0.99 (99th percentile).
+        """
+        self.lower_quantile = lower_quantile
+        self.upper_quantile = upper_quantile
+        self.lower_bounds_ = None
+        self.upper_bounds_ = None
+
+    def fit(self, X, y=None):
+        """
+        Compute the quantile bounds for Winsorization.
+
+        Parameters:
+        -----------
+        X : pandas DataFrame or numpy array
+            Input data to compute bounds.
+        y : Ignored
+            Compatibility with fit-transform pipeline.
+
+        Returns:
+        --------
+        self : object
+            Returns the instance itself.
+        """
+        X = pd.DataFrame(X)
+        self.lower_bounds_ = X.quantile(self.lower_quantile)
+        self.upper_bounds_ = X.quantile(self.upper_quantile)
+        return self
+
+    def transform(self, X, y=None):
+        """
+        Apply Winsorization to the dataset.
+
+        Parameters:
+        -----------
+        X : pandas DataFrame or numpy array
+            Input data to Winsorize.
+        y : Ignored
+            Compatibility with fit-transform pipeline.
+
+        Returns:
+        --------
+        X_winsorized : pandas DataFrame
+            The Winsorized dataset.
+        """
+        X = pd.DataFrame(X)
+        X_winsorized = X.clip(lower=self.lower_bounds_, upper=self.upper_bounds_, axis=1)
+        return X_winsorized
+
+    def fit_transform(self, X, y=None):
+        """
+        Fit and transform the dataset in a single step.
+
+        Parameters:
+        -----------
+        X : pandas DataFrame or numpy array
+            Input data to Winsorize.
+        y : Ignored
+            Compatibility with fit-transform pipeline.
+
+        Returns:
+        --------
+        X_winsorized : pandas DataFrame
+            The Winsorized dataset.
+        """
+        self.fit(X)
+        return self.transform(X)
+
+    def get_bounds(self):
+        """
+        Get the lower and upper quantile bounds for each feature.
+
+        Returns:
+        --------
+        bounds : pandas DataFrame
+            A DataFrame containing lower and upper bounds for each feature.
+        """
+        bounds = pd.DataFrame({
+            'Lower Bound': self.lower_bounds_,
+            'Upper Bound': self.upper_bounds_
+        })
+        return bounds
+
+    def get_outlier_indices(self, X):
+        """
+        Get the indices of potential outliers that were Winsorized.
+
+        Parameters:
+        -----------
+        X : pandas DataFrame or numpy array
+            Input data to check for Winsorized outliers.
+
+        Returns:
+        --------
+        outlier_indices : list
+            A list of indices where values were Winsorized.
+        """
+        X = pd.DataFrame(X)
+        outlier_mask = ((X < self.lower_bounds_) | (X > self.upper_bounds_))
+        return X[outlier_mask.any(axis=1)].index.tolist()
+
 def download_zip_df(file_url):    
     try:
         response = requests.get(file_url)
@@ -285,18 +672,6 @@ def download_zip_df(file_url):
         print(f'An error occurred: {e}')
         return None
 
-class TqdmCallback:
-    def __init__(self, total):
-        self.pbar = tqdm(total=total)
-        self.update_interval = total // 20  # Update every 5%
-        self.last_update = 0
-
-    def __call__(self, res):
-        current_progress = len(res.x_iters)
-        if current_progress - self.last_update >= self.update_interval:
-            self.pbar.update(current_progress - self.last_update)
-            self.last_update = current_progress
-
 def numerical_categorical_cols(df):
     """
     Separates numerical and categorical columns from a DataFrame.
@@ -317,7 +692,7 @@ def numerical_categorical_cols(df):
     
     return numerical_cols, categorical_cols
 
-def Standard_Outlier_Remover(X_train, y_train, num_cols, num_std=3):
+
     """
     Remove outliers from specified numeric columns in X_train and corresponding records in y_train.
     
@@ -537,14 +912,14 @@ def normality_tests(data):
         # Collect results in a dictionary
         return {
             'Shapiro-Wilk Stat': shapiro_stat,
-            'Shapiro-Wilk p': shapiro_p,
+            'Shapiro-Wilk p': round(shapiro_p, 6),
             'KS Stat': ks_stat,
-            'KS p': ks_p,
+            'KS p': round(ks_p,6),
             'Anderson-Darling Stat': anderson_stat,
             'Lilliefors Stat': lilliefors_stat,
-            'Lilliefors p': lilliefors_p,
+            'Lilliefors p': round(lilliefors_p, 6),
             'D’Agostino Stat': dagostino_stat,
-            'D’Agostino p': dagostino_p
+            'D’Agostino p': round(dagostino_p, 6)
         }
 
     # Check if the input is 1D (list, numpy array, pandas Series)
@@ -566,12 +941,12 @@ def normality_tests(data):
             'Anderson-Darling Stat', 
             'Lilliefors Stat', 'Lilliefors p', 
             'D’Agostino Stat', 'D’Agostino p'
-        ])
+        ]).T
 
     else:
         raise TypeError("The data should be a 1D array-like structure (e.g., Python list, NumPy array, or Pandas Series) or a 2D pandas DataFrame.")
 
-def heatmap_spearman_significance(df, annot=True):
+def corr_heatmap_significance(df, method = 'spearman', annot=True):
     """
     Generate a heatmap displaying the Spearman's rank correlation coefficients 
     for each pair of variables in the provided DataFrame. If annot is True, 
@@ -591,7 +966,7 @@ def heatmap_spearman_significance(df, annot=True):
                p-values for each pair of variables.
     """
     # Initialize matrices
-    correlations = df.corr(method='spearman')
+    correlations = df.corr(method=method)
     annotations = pd.DataFrame(index=df.columns, columns=df.columns)
     results = []
 
@@ -622,10 +997,10 @@ def heatmap_spearman_significance(df, annot=True):
     # Plot heatmap
     plt.figure(figsize=(10, 8))
     if annot:
-        sns.heatmap(correlations, annot=annotations, mask=mask, cmap='coolwarm', fmt='', cbar_kws={'label': 'Spearman Correlation Coefficient'})
+        sns.heatmap(correlations, annot=annotations, mask=mask, cmap='coolwarm', fmt='', cbar_kws={'label': 'Correlation Coefficient'})
     else:
         sns.heatmap(correlations, annot=False, mask=mask, cmap='coolwarm', cbar_kws={'label': 'Spearman Correlation Coefficient'})
-    plt.title("Spearman's Rank Correlation Heatmap" + (" with P-value and Significance Annotations" if annot else ""))
+    plt.title("Correlation Heatmap" + (" with P-value and Significance Annotations" if annot else ""))
     plt.show()
 
     # Convert results list to DataFrame and return
@@ -1132,3 +1507,334 @@ def linreg_p_values(model, X, y):
     final_df = pd.DataFrame(data)
     
     return final_df
+
+def plot_grid_search(cv_results, grid_params):
+    """
+    Plots the test scores from a Grid Search as either a line plot or heatmap based on the number of hyperparameters.
+
+    Parameters:
+    -----------
+    cv_results : dict
+        A dictionary of cross-validation results, usually obtained from `GridSearchCV.cv_results_`.
+    
+    grid_params : list of str
+        A list of hyperparameter names that are part of the grid search.
+
+    Returns:
+    --------
+    None
+
+    Notes:
+    ------
+    - If there's only one hyperparameter, the function will plot a line plot.
+    - If there are two hyperparameters, the function will plot a heatmap.
+    - If there are more than two hyperparameters, the function will print a message indicating its limitation.
+    
+    Example:
+    --------
+    >>> plot_grid_search(cv_results, ['param1', 'param2'])
+    [Heatmap is displayed]
+
+    >>> plot_grid_search(cv_results, ['param1'])
+    [Line plot is displayed]
+    """
+    #Convert to DataFrame
+    results = pd.DataFrame(cv_results)
+
+    # If only one hyperparameter, plot a line plot
+    if len(grid_params) == 1:
+        param = 'param_' + grid_params[0]
+        plt.figure(figsize=(8, 6))
+        plt.plot(results[param], results['mean_test_score'], marker='o')
+        plt.xlabel(grid_params[0])
+        plt.ylabel('Mean Test Score')
+        plt.title(f"Grid Search Test Scores")
+        plt.show()
+    
+    # If two hyperparameters, plot a heatmap
+    elif len(grid_params) == 2:
+        pivot_table = results.pivot(index=f'param_{grid_params[0]}', 
+                                    columns=f'param_{grid_params[1]}', 
+                                    values='mean_test_score')
+        sns.heatmap(pivot_table, annot=True, cmap='coolwarm')
+        plt.xlabel(grid_params[1])
+        plt.ylabel(grid_params[0])
+        plt.title(f"Grid Search Test Score Heatmap")
+        plt.show()
+
+    # For more than two hyperparameters, print a message
+    else:
+        print("The function is designed to plot up to two hyperparameters.")
+
+def grid_log_c(X_train, y_train, X_test, y_test, C_values, penalty='l1', solver = 'liblinear', random_state=23):
+    """
+    Evaluates and plots the train and test accuracy of a logistic regression model for various C values.
+
+    Parameters:
+    -----------
+    X_train : array-like or DataFrame
+        The features for the training set.
+    y_train : array-like or DataFrame
+        The target variable for the training set.
+    X_test : array-like or DataFrame
+        The features for the test set.
+    y_test : array-like or DataFrame
+        The target variable for the test set.
+    C_values : list of floats
+        The list of C values to evaluate. C is the inverse regularization strength.
+    penalty : str, optional
+        The penalty type to use in the logistic regression model ('l1' or 'l2'). Default is 'l1'.
+    solver: str, optional
+        Algorithm to use in the optimization problem. Default is ‘liblinear’.
+    random_state : int, optional
+        The number used to initialize a pseudorandom number generator, which is used for reproducibility of the results.
+
+    Returns:
+    --------
+    train_accuracies : list of floats
+        The train accuracies for the different C values.
+    test_accuracies : list of floats
+        The test accuracies for the different C values.
+    
+    Notes:
+    ------
+    - This function uses a log scale for the C values on the x-axis of the plot.
+
+    Example:
+    --------
+    >>> C_values = [0.001, 0.01, 0.1, 1, 10]
+    >>> grid_log_c(X_train, y_train, X_test, y_test, C_values, 32)
+
+    """
+    train_accuracies = []
+    test_accuracies = []
+
+    # Implement a model
+    for c in C_values:
+        lr = LogisticRegression(C=c, solver=solver, penalty=penalty, random_state=random_state)
+        lr.fit(X_train, y_train)
+
+        train_accuracy = lr.score(X_train, y_train)
+        test_accuracy = lr.score(X_test, y_test)
+
+        train_accuracies.append(train_accuracy)
+        test_accuracies.append(test_accuracy)
+
+    # Draw a plot
+    plt.figure(figsize=(10, 6))
+    plt.plot(C_values, train_accuracies, label='Train Accuracy', marker='o')
+    plt.plot(C_values, test_accuracies, label='Test Accuracy', marker='^')
+    plt.xscale('log')
+    plt.xlabel('C Value (log scale)')
+    plt.ylabel('Accuracy')
+    plt.title('Train and Test Accuracy for Different C Values')
+    plt.legend()
+    plt.show()
+
+    return train_accuracies, test_accuracies
+
+def feature_importance_logreg(classifier, X_train, y_train, cut_off=0.05):
+    
+    """
+    Plots feature importances for a logistic regression model using L1 regularisation.
+
+    Parameters:
+    ----------
+    classifier : sklearn.linear_model object
+        The logistic regression model. 
+    X_train : array-like or DataFrame
+        The features for the training set.
+    y_train : array-like or DataFrame
+        The target variable for the training set. 
+    cut_off : float, optional
+        The cut-off value to consider for feature importance.
+
+    Returns:
+    -------
+    feature_df : pandas DataFrame
+        A DataFrame containing the features sorted by their importance.
+        
+    omitted_df : pandas DataFrame
+        A DataFrame containing the features that were omitted based on the cut-off value.
+    """
+    # Create the model
+    classifier.fit(X_train, y_train)
+    
+    # Get feature importances
+    feature_importance_values = np.abs(classifier.coef_)
+    
+    # Sort feature importances
+    indices = np.argsort(feature_importance_values[0])[::-1]
+    
+    sorted_feature_names = [X_train.columns[i] for i in indices]
+    sorted_importance_values = [feature_importance_values[0][i] for i in indices]
+    
+    # Apply cutoff if specified
+    if cut_off is not None:
+        omitted_feature_names = [name for i, name in enumerate(sorted_feature_names) if sorted_importance_values[i] < cut_off]
+        omitted_importance_values = [value for value in sorted_importance_values if value < cut_off]
+        
+        sorted_feature_names = [name for name in sorted_feature_names if name not in omitted_feature_names]
+        sorted_importance_values = [value for value in sorted_importance_values if value >= cut_off]
+    
+    # Plot feature importances
+    plt.figure(figsize=(12, 6))
+    plt.title("Feature Importance")
+    plt.bar(range(len(sorted_importance_values)), sorted_importance_values, align="center")
+    plt.xticks(range(len(sorted_importance_values)), sorted_feature_names, rotation=90)  # Add rotation for better visibility
+    plt.xlabel("Feature Name")
+    plt.ylabel("Absolute Coefficient Value")
+    plt.show()
+    
+    # Create a DataFrame for sorted feature importances
+    feature_df = pd.DataFrame({
+        'Feature': sorted_feature_names,
+        'Importance': sorted_importance_values
+    })
+    
+    # Create a DataFrame for omitted feature importances
+    omitted_df = pd.DataFrame({
+        'Omitted Feature': omitted_feature_names,
+        'Omitted Importance': omitted_importance_values
+    })
+    
+    return feature_df, omitted_df
+
+def plot_omitted_accuracy(classifier, X_train, y_train, X_test, y_test, high_pvalues, low_imp_df, SEED=42):
+    """
+    Plots the train and test accuracy of a Logistic Regression model when omitting certain variables.
+    Performs this operation with and without replacement.
+
+    Parameters:
+    -----------
+    classifier : sklearn.linear_model object
+        The logistic regression model. 
+    X_train, y_train : Training data and labels
+    X_test, y_test : Test data and labels
+    high_pvalues : list of features to be omitted based on high p-values
+    low_imp_df : DataFrame containing features to be omitted based on low importance
+    SEED : random state seed for reproducibility
+
+    Returns:
+    --------
+    acc_df : DataFrame containing train and test accuracies
+
+    """
+    fig, axs = plt.subplots(1, 2, figsize=(24, 6))
+
+    # Omitting variables with replacement
+    to_delete = set(high_pvalues + low_imp_df['Omitted Feature'].to_list())
+    acc_dict = {}
+    for var in to_delete:
+        X_train_fe = X_train.copy()
+        X_train_fe.drop(columns=var, inplace=True)
+        classifier.fit(X_train_fe, y_train)
+        train_score = classifier.score(X_train_fe, y_train)
+        y_pred_fe = classifier.predict(X_test_final[X_train_fe.columns])
+        test_score = accuracy_score(y_pred_fe, y_test)
+        acc_dict[var] = [train_score, test_score]
+    acc_df = pd.DataFrame(acc_dict).transpose()
+    acc_df.columns = ['train_acc', 'test_acc']
+    
+    # Creating a lineplot 0
+    acc_df.plot(ax=axs[0], title='With Replacement')
+    axs[0].set_xticks(np.arange(len(acc_df.index)))
+    axs[0].set_xticklabels(acc_df.index, rotation=90)
+
+    # Omitting variables without replacement
+    to_delete = list(acc_df.sort_values('test_acc', ascending=False).index)
+    acc_dict = {}
+    X_train_fe = X_train.copy()
+    for var in to_delete:
+        X_train_fe.drop(columns=var, inplace=True)
+        classifier.fit(X_train_fe, y_train)
+        train_score = classifier.score(X_train_fe, y_train)
+        y_pred_fe = classifier.predict(X_test_final[X_train_fe.columns])
+        test_score = accuracy_score(y_pred_fe, y_test)
+        acc_dict[var] = [train_score, test_score]
+    acc_df = pd.DataFrame(acc_dict).transpose()
+    acc_df.columns = ['train_acc', 'test_acc']
+    
+    # Creating the list of omitted variables
+    acc_delete = []
+    # Finding the last occurrence of the max test accuracy
+    max_test_acc = acc_df['test_acc'].max()
+    last_max_nm = acc_df[::-1]['test_acc'].idxmax()
+    last_max_index = acc_df.index.get_loc(last_max_nm)
+
+    for var in acc_df.index:
+        if var != last_max_nm:
+            acc_delete.append(var)
+        else: 
+            break
+        
+    # Creating a lineplot 1
+    acc_df.plot(ax=axs[1], title='Without Replacement')
+    axs[1].set_xticks(np.arange(len(acc_df.index)))
+    axs[1].set_xticklabels(acc_df.index, rotation=90)
+    axs[1].axvline(last_max_index, color='red', linestyle='--', label='Max Test Accuracy')
+    axs[1].legend()
+    plt.show()
+        
+    return acc_df, acc_delete
+
+def plot_roc(X, y, classifier, n_splits):
+    """
+    Plots the Receiver Operating Characteristic (ROC) curve using Stratified K-Fold cross-validation.
+
+    Parameters:
+    -----------
+    X_train : pandas DataFrame
+        The feature matrix for the training set.
+    y_train : pandas Series
+        The target vector for the training set.
+    classifier : scikit-learn classifier object
+        A fitted classifier that has a `predict_proba` method.
+    n_splits : int
+        The number of folds for Stratified K-Fold cross-validation.
+
+    Returns:
+    --------
+    [The ROC curves from each fold as well as the mean and +/- 1 std. dev. are plotted.]
+
+    Notes:
+    ------
+    - The AUC (Area Under the Curve) for each fold is also displayed.
+    """
+    
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=123)
+    
+    tprs = []
+    aucs = []
+    mean_fpr = np.linspace(0, 1, 100)
+
+    fig, ax = plt.subplots()
+
+    for i, (train_idx, test_idx) in enumerate(skf.split(X, y)):
+        classifier.fit(X.iloc[train_idx], y.iloc[train_idx])  # Use iloc for DataFrame
+
+        # Compute ROC values
+        fpr, tpr, _ = roc_curve(y.iloc[test_idx], classifier.predict_proba(X.iloc[test_idx])[:,1])
+        tprs.append(np.interp(mean_fpr, fpr, tpr))
+        tprs[-1][0] = 0.0
+        roc_auc = auc(fpr, tpr)
+        aucs.append(roc_auc)
+        ax.plot(fpr, tpr, lw=1, alpha=0.3, label='ROC fold %d (AUC = %0.2f)' % (i, roc_auc))
+
+    ax.plot([0, 1], [0, 1], linestyle='--', lw=2, color='r', label='Chance', alpha=.8)
+
+    mean_tpr = np.mean(tprs, axis=0)
+    mean_tpr[-1] = 1.0
+    mean_auc = auc(mean_fpr, mean_tpr)
+    std_auc = np.std(aucs)
+    ax.plot(mean_fpr, mean_tpr, color='b', label=r'Mean ROC (AUC = %0.2f $\pm$ %0.2f)' % (mean_auc, std_auc), lw=2, alpha=.8)
+
+    std_tpr = np.std(tprs, axis=0)
+    tprs_upper = np.minimum(mean_tpr + std_tpr, 1)
+    tprs_lower = np.maximum(mean_tpr - std_tpr, 0)
+    ax.fill_between(mean_fpr, tprs_lower, tprs_upper, color='grey', alpha=.2, label=r'$\pm$ 1 std. dev.')
+
+    ax.set(xlim=[-0.05, 1.05], ylim=[-0.05, 1.05], title="Receiver operating characteristic",xlabel = 'False Positive Rate',
+          ylabel = 'True Positive Rate')
+    ax.legend(loc="lower right")
+    plt.show()
