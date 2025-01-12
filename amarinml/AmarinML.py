@@ -37,7 +37,7 @@ from io import BytesIO
 from mlxtend.plotting import plot_decision_regions
 from scipy import stats
 from sklearn import feature_selection
-from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin, TransformerMixin
+from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin, TransformerMixin, clone
 from sklearn.calibration import calibration_curve
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
@@ -551,6 +551,10 @@ class WinsorizerHandler:
         self.upper_quantile = upper_quantile
         self.lower_bounds_ = None
         self.upper_bounds_ = None
+        self.lower_bound_y_ = None
+        self.upper_bound_y_ = None
+
+        self.outlier_share_ = None  # Store the proportion of Winsorized points (X + y combined)
 
     def fit(self, X, y=None):
         """
@@ -560,90 +564,166 @@ class WinsorizerHandler:
         -----------
         X : pandas DataFrame or numpy array
             Input data to compute bounds.
-        y : Ignored
-            Compatibility with fit-transform pipeline.
+        y : array-like or Series, optional
+            Target data to compute bounds if we want to winsorize y as well.
 
         Returns:
         --------
         self : object
             Returns the instance itself.
         """
+        # 1) Handle X
         X = pd.DataFrame(X)
         self.lower_bounds_ = X.quantile(self.lower_quantile)
         self.upper_bounds_ = X.quantile(self.upper_quantile)
+
+        # 2) Handle y if provided
+        if y is not None:
+            y_series = pd.Series(y).astype(float)
+            self.lower_bound_y_ = y_series.quantile(self.lower_quantile)
+            self.upper_bound_y_ = y_series.quantile(self.upper_quantile)
+        else:
+            self.lower_bound_y_ = None
+            self.upper_bound_y_ = None
+
         return self
 
     def transform(self, X, y=None):
         """
-        Apply Winsorization to the dataset.
+        Apply Winsorization (clip) to the dataset (X) and optionally the target (y).
+        Also compute the outlier share.
 
         Parameters:
         -----------
         X : pandas DataFrame or numpy array
             Input data to Winsorize.
-        y : Ignored
-            Compatibility with fit-transform pipeline.
+        y : array-like or Series, optional
+            Target data to Winsorize if needed.
 
         Returns:
         --------
         X_winsorized : pandas DataFrame
-            The Winsorized dataset.
+            The Winsorized dataset for X.
+        y_winsorized : pandas Series or None
+            The Winsorized target if y was provided, otherwise None.
         """
         X = pd.DataFrame(X)
+        # Identify where values are below or above bounds for X
+        outlier_mask_X = (X < self.lower_bounds_) | (X > self.upper_bounds_)
+        total_outliers_X = outlier_mask_X.sum().sum()  # total outlier cells in X
+
+        # Winsorize (clip) the data
         X_winsorized = X.clip(lower=self.lower_bounds_, upper=self.upper_bounds_, axis=1)
-        return X_winsorized
+
+        y_winsorized = None
+        total_outliers_y = 0  # we'll count how many values in y are clipped if y is provided
+
+        # If y is provided, winsorize y as well
+        if y is not None and self.lower_bound_y_ is not None and self.upper_bound_y_ is not None:
+            y_series = pd.Series(y).astype(float)
+            outlier_mask_y = (y_series < self.lower_bound_y_) | (y_series > self.upper_bound_y_)
+            total_outliers_y = outlier_mask_y.sum()
+            y_winsorized = y_series.clip(lower=self.lower_bound_y_, upper=self.upper_bound_y_)
+
+        # Calculate the total share of outliers (X + y)
+        total_values_X = X.size
+        total_values_y = len(y) if y is not None else 0
+        total_values = total_values_X + total_values_y
+
+        total_outliers = total_outliers_X + total_outliers_y
+        self.outlier_share_ = total_outliers / total_values if total_values > 0 else 0
+
+        if y is not None:
+            return X_winsorized, y_winsorized
+        else:
+            return X_winsorized
 
     def fit_transform(self, X, y=None):
         """
-        Fit and transform the dataset in a single step.
+        Fit and transform the dataset (X) and optionally the target (y) in a single step.
 
         Parameters:
         -----------
         X : pandas DataFrame or numpy array
             Input data to Winsorize.
-        y : Ignored
-            Compatibility with fit-transform pipeline.
+        y : array-like or Series, optional
+            Target data to Winsorize if needed.
 
         Returns:
         --------
         X_winsorized : pandas DataFrame
-            The Winsorized dataset.
+            The Winsorized dataset for X.
+        y_winsorized : pandas Series or None
+            The Winsorized target if y was provided, otherwise None.
         """
-        self.fit(X)
-        return self.transform(X)
+        self.fit(X, y=y)
+        return self.transform(X, y=y)
 
     def get_bounds(self):
         """
-        Get the lower and upper quantile bounds for each feature.
-
+        Get the lower and upper quantile bounds for each feature in X.
+        If y was included, also return the bounds for y.
+        
         Returns:
         --------
-        bounds : pandas DataFrame
-            A DataFrame containing lower and upper bounds for each feature.
+        bounds : dict
+            Dictionary with:
+              - "X": DataFrame of X's lower & upper bounds
+              - "y": (lower_bound, upper_bound) if y was fit
         """
-        bounds = pd.DataFrame({
+        bounds_X = pd.DataFrame({
             'Lower Bound': self.lower_bounds_,
             'Upper Bound': self.upper_bounds_
         })
-        return bounds
 
-    def get_outlier_indices(self, X):
+        if self.lower_bound_y_ is not None and self.upper_bound_y_ is not None:
+            bounds_y = (self.lower_bound_y_, self.upper_bound_y_)
+        else:
+            bounds_y = None
+
+        return {
+            'X': bounds_X,
+            'y': bounds_y
+        }
+
+    def get_outlier_indices(self, X, y=None):
         """
-        Get the indices of potential outliers that were Winsorized.
+        Get the indices of potential outliers that were Winsorized in X and optionally y.
 
         Parameters:
         -----------
         X : pandas DataFrame or numpy array
             Input data to check for Winsorized outliers.
+        y : array-like or Series, optional
+            Target data to check for Winsorized outliers.
 
         Returns:
         --------
-        outlier_indices : list
-            A list of indices where values were Winsorized.
+        outlier_indices_X : list
+            List of indices where X was Winsorized in at least one column.
+        outlier_indices_y : list or None
+            List of indices where y was Winsorized (if y was provided), otherwise None.
         """
         X = pd.DataFrame(X)
-        outlier_mask = ((X < self.lower_bounds_) | (X > self.upper_bounds_))
-        return X[outlier_mask.any(axis=1)].index.tolist()
+        outlier_mask_X = (X < self.lower_bounds_) | (X > self.upper_bounds_)
+        outlier_indices_X = X[outlier_mask_X.any(axis=1)].index.tolist()
+
+        outlier_indices_y = None
+        if y is not None and self.lower_bound_y_ is not None and self.upper_bound_y_ is not None:
+            y_series = pd.Series(y).astype(float)
+            outlier_mask_y = (y_series < self.lower_bound_y_) | (y_series > self.upper_bound_y_)
+            outlier_indices_y = y_series[outlier_mask_y].index.tolist()
+
+        return outlier_indices_X, outlier_indices_y
+
+    def print_outlier_share(self):
+        """
+        Print the proportion of data points (cells) that were Winsorized in X plus any y.
+        """
+        if self.outlier_share_ is not None:
+            print(f"Total share of Winsorized cells: {self.outlier_share_ * 100:.2f}%")
+        else:
+            print("Outlier share not calculated. Ensure `transform` or `fit_transform` has been called.")
 
 def download_zip_df(file_url):    
     try:
@@ -1730,7 +1810,7 @@ def plot_omitted_accuracy(classifier, X_train, y_train, X_test, y_test, high_pva
         X_train_fe.drop(columns=var, inplace=True)
         classifier.fit(X_train_fe, y_train)
         train_score = classifier.score(X_train_fe, y_train)
-        y_pred_fe = classifier.predict(X_test_final[X_train_fe.columns])
+        y_pred_fe = classifier.predict(X_test[X_train_fe.columns])
         test_score = accuracy_score(y_pred_fe, y_test)
         acc_dict[var] = [train_score, test_score]
     acc_df = pd.DataFrame(acc_dict).transpose()
@@ -1749,7 +1829,7 @@ def plot_omitted_accuracy(classifier, X_train, y_train, X_test, y_test, high_pva
         X_train_fe.drop(columns=var, inplace=True)
         classifier.fit(X_train_fe, y_train)
         train_score = classifier.score(X_train_fe, y_train)
-        y_pred_fe = classifier.predict(X_test_final[X_train_fe.columns])
+        y_pred_fe = classifier.predict(X_test[X_train_fe.columns])
         test_score = accuracy_score(y_pred_fe, y_test)
         acc_dict[var] = [train_score, test_score]
     acc_df = pd.DataFrame(acc_dict).transpose()
@@ -1778,30 +1858,25 @@ def plot_omitted_accuracy(classifier, X_train, y_train, X_test, y_test, high_pva
         
     return acc_df, acc_delete
 
-def plot_roc(X, y, classifier, n_splits):
+def plot_roc(X, y, classifier, n_splits, custom_threshold=0.5):
     """
-    Plots the Receiver Operating Characteristic (ROC) curve using Stratified K-Fold cross-validation.
+    Plots the Receiver Operating Characteristic (ROC) curve using Stratified K-Fold 
+    cross-validation and highlights a given custom threshold on the curve.
 
     Parameters:
     -----------
-    X_train : pandas DataFrame
-        The feature matrix for the training set.
-    y_train : pandas Series
-        The target vector for the training set.
-    classifier : scikit-learn classifier object
-        A fitted classifier that has a `predict_proba` method.
+    X : pandas DataFrame
+        The feature matrix.
+    y : pandas Series
+        The target vector.
+    classifier : scikit-learn classifier
+        A classifier that has a `fit` and `predict_proba` method.
     n_splits : int
         The number of folds for Stratified K-Fold cross-validation.
-
-    Returns:
-    --------
-    [The ROC curves from each fold as well as the mean and +/- 1 std. dev. are plotted.]
-
-    Notes:
-    ------
-    - The AUC (Area Under the Curve) for each fold is also displayed.
+    custom_threshold : float, optional (default=0.8)
+        The custom probability threshold to highlight on the ROC curve.
     """
-    
+
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=123)
     
     tprs = []
@@ -1811,30 +1886,139 @@ def plot_roc(X, y, classifier, n_splits):
     fig, ax = plt.subplots()
 
     for i, (train_idx, test_idx) in enumerate(skf.split(X, y)):
-        classifier.fit(X.iloc[train_idx], y.iloc[train_idx])  # Use iloc for DataFrame
+        # Clone the classifier so each fold starts with a fresh model
+        clf_fold = clone(classifier)
+        clf_fold.fit(X.iloc[train_idx], y.iloc[train_idx])
 
-        # Compute ROC values
-        fpr, tpr, _ = roc_curve(y.iloc[test_idx], classifier.predict_proba(X.iloc[test_idx])[:,1])
-        tprs.append(np.interp(mean_fpr, fpr, tpr))
-        tprs[-1][0] = 0.0
+        # Predict probabilities for the positive class
+        y_prob = clf_fold.predict_proba(X.iloc[test_idx])[:, 1]
+
+        # 1) Compute standard ROC for all thresholds
+        fpr, tpr, thresholds = roc_curve(y.iloc[test_idx], y_prob)
         roc_auc = auc(fpr, tpr)
         aucs.append(roc_auc)
-        ax.plot(fpr, tpr, lw=1, alpha=0.3, label='ROC fold %d (AUC = %0.2f)' % (i, roc_auc))
 
-    ax.plot([0, 1], [0, 1], linestyle='--', lw=2, color='r', label='Chance', alpha=.8)
+        # 2) Interpolate TPR for "mean_fpr" to average across folds
+        tprs.append(np.interp(mean_fpr, fpr, tpr))
+        tprs[-1][0] = 0.0
+        
+        # Plot each fold’s ROC
+        ax.plot(fpr, tpr, lw=1, alpha=0.3, 
+                label=f'ROC fold {i} (AUC = {roc_auc:.2f})')
 
+        # 3) Find the point on ROC closest to custom_threshold
+        #    This means: find the index in `thresholds` where threshold is ~ custom_threshold
+        #    Then we can mark that point on the curve.
+        #    Note: thresholds are sorted descending from 1 to 0
+        idx = np.argmin(np.abs(thresholds - custom_threshold))
+        
+        # Mark the point (fpr[idx], tpr[idx]) on the current fold’s ROC
+        ax.scatter(fpr[idx], tpr[idx], color='black', s=30, 
+                   label=(f"Threshold={custom_threshold:.2f}, fold={i}")
+                   if i == 0 else None,  # So the legend entry only appears once
+                   zorder=5)
+
+    # Plot the "chance" line
+    ax.plot([0, 1], [0, 1], linestyle='--', lw=2, color='r', alpha=0.8, label='Chance')
+
+    # Compute mean and std of TPR for the "mean_fpr"
     mean_tpr = np.mean(tprs, axis=0)
     mean_tpr[-1] = 1.0
     mean_auc = auc(mean_fpr, mean_tpr)
     std_auc = np.std(aucs)
-    ax.plot(mean_fpr, mean_tpr, color='b', label=r'Mean ROC (AUC = %0.2f $\pm$ %0.2f)' % (mean_auc, std_auc), lw=2, alpha=.8)
 
+    ax.plot(mean_fpr, mean_tpr, color='b',
+            label=r'Mean ROC (AUC = %0.2f $\pm$ %0.2f)' % (mean_auc, std_auc),
+            lw=2, alpha=.8)
+
+    # +/- 1 std. deviation
     std_tpr = np.std(tprs, axis=0)
     tprs_upper = np.minimum(mean_tpr + std_tpr, 1)
     tprs_lower = np.maximum(mean_tpr - std_tpr, 0)
-    ax.fill_between(mean_fpr, tprs_lower, tprs_upper, color='grey', alpha=.2, label=r'$\pm$ 1 std. dev.')
+    ax.fill_between(mean_fpr, tprs_lower, tprs_upper, color='grey', alpha=.2,
+                    label=r'$\pm$ 1 std. dev.')
 
-    ax.set(xlim=[-0.05, 1.05], ylim=[-0.05, 1.05], title="Receiver operating characteristic",xlabel = 'False Positive Rate',
-          ylabel = 'True Positive Rate')
+    ax.set(
+        xlim=[-0.05, 1.05], ylim=[-0.05, 1.05],
+        xlabel='False Positive Rate', ylabel='True Positive Rate',
+        title="Receiver Operating Characteristic (Custom Threshold Marked)"
+    )
     ax.legend(loc="lower right")
+    plt.show()
+
+def deviance_residuals(y_test, y_pred_proba):
+
+    #Compute deviance residuals
+    y_log = np.log(y_pred_proba)
+    nlog = np.log(1 - y_pred_proba)
+    dev_res = np.sign(y_test - y_pred_proba) * np.sqrt(-2 * (y_test * y_log + (1 - y_test) * nlog))
+    
+    # Plotting
+    plt.figure(figsize=(10, 6))
+    plt.scatter(y_pred_proba, dev_res, color='blue', alpha=0.2, label='Deviance Residuals')
+    plt.axhline(0, color='red', linestyle='--', linewidth=1.2, label='Zero Line')
+    plt.xlabel('Predicted Probabilities')
+    plt.ylabel('Deviance Residuals')
+    plt.title('Deviance Residuals vs. Predicted Probabilities')
+    plt.legend()
+    plt.show()
+    
+    return dev_res
+
+def best_clf_tshld(y_test, y_pred_proba):
+    fpr, tpr, thresholds = roc_curve(y_test, y_pred_proba)
+    thresholds = np.clip(thresholds, 0, 1)
+    
+    # Compute F1 scores for different thresholds
+    f1_scores = [
+        f1_score(y_test, (y_pred_proba > t).astype(int))
+        for t in thresholds
+    ]
+    
+    # Identify the threshold with the maximum F1 score
+    best_threshold_f1 = thresholds[np.argmax(f1_scores)]
+    
+    # Plotting the F1 score for each threshold
+    plt.figure(figsize=(10, 6))
+    plt.plot(thresholds, f1_scores, label='F1 Score')
+    plt.scatter(best_threshold_f1, np.max(f1_scores), color='red', label='Best threshold (F1 max)')
+    plt.xlabel('Threshold')
+    plt.ylabel('F1 Score')
+    plt.title('F1 Score across different thresholds')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+    
+    print('Best threshold by F1-score: ', best_threshold_f1)
+    return best_threshold_f1
+
+def plot_lift_curve(y_test, y_probs):
+    # 5. Sort instances by predicted probability (descending)
+    data_test = pd.DataFrame({'y_true': y_test, 'y_prob': y_probs})
+    data_test.sort_values(by='y_prob', ascending=False, inplace=True)
+    
+    # 6. Calculate cumulative gains
+    data_test['cum_positives'] = data_test['y_true'].cumsum()
+    total_positives = data_test['y_true'].sum()
+    
+    # 7. Compute % of samples
+    data_test['pct_samples'] = np.arange(1, len(data_test) + 1) / len(data_test)
+    
+    # 8. Compute cumulative capture rate of positives
+    data_test['capture_rate'] = data_test['cum_positives'] / total_positives
+    
+    # 9. Plot the Lift Curve (Cumulative Gains Curve)
+    plt.figure(figsize=(8,6))
+    
+    # Plot model's capture rate
+    plt.plot(data_test['pct_samples'], data_test['capture_rate'], label='Model')
+    
+    # Plot baseline (random) line
+    plt.plot([0, 1], [0, 1], '--', color='red', label='Random')
+    
+    plt.title('Lift Curve (Cumulative Gains Curve)')
+    plt.xlabel('Percentage of Samples')
+    plt.ylabel('Cumulative Capture of Positives')
+    plt.legend(loc='lower right')
+    plt.grid(True)
     plt.show()
